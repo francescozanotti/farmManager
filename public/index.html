@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Render Farm Manager</title>
+</head>
+<body>
+  <h1>Render Farm Manager</h1>
+
+  <div>
+    <h2>Render Farm Status</h2>
+    <button id="syncAllBtn">Sync All Clients</button>
+    <div>
+      <span>Total Machines: <span id="totalMachines">0</span></span>
+      <span>Online: <span id="onlineMachines">0</span></span>
+      <span>Rendering: <span id="renderingMachines">0</span></span>
+      <span>Synced: <span id="syncedMachines">0</span></span>
+    </div>
+  </div>
+
+  <div>
+    <h2>Connected Machines</h2>
+    <div id="clientsList">
+      <p>Loading connected machines...</p>
+    </div>
+  </div>
+
+  <div>
+    <h2>Render Logs</h2>
+    <select id="logHostSelect">
+      <option value="">-- Select Machine --</option>
+    </select>
+    <div id="consoleOutput" style="height: 300px; overflow-y: auto; background-color: #000; color: #fff; font-family: monospace;">
+      <p>Select a machine to view render logs</p>
+    </div>
+  </div>
+
+  <!-- Render Control Modal -->
+  <div id="renderControlModal" style="display: none;">
+    <h3>Start Render on <span id="renderMachineName"></span></h3>
+    <form id="renderForm">
+      <input type="hidden" id="renderHostname">
+      
+      <div>
+        <label for="houdiniVersion">Houdini Version</label>
+        <select id="houdiniVersion" required></select>
+      </div>
+      
+      <div>
+        <label for="scenePath">Scene Path (USD File)</label>
+        <input type="text" id="scenePath" value="F:/assets/scripts/myrenderfarm/rop1.usd" required>
+      </div>
+      
+      <div>
+        <label for="outputPath">Output Path</label>
+        <input type="text" id="outputPath" value="F:/assets/scripts/myrenderfarm/sequence1-10/$F3.exr" required>
+        <small>Use $F3 for frame number with padding</small>
+      </div>
+      
+      <div>
+        <label for="frameStart">Start Frame</label>
+        <input type="number" id="frameStart" min="1" value="1" required>
+      </div>
+      
+      <div>
+        <label for="frameEnd">End Frame</label>
+        <input type="number" id="frameEnd" min="1" value="10" required>
+      </div>
+      
+      <button type="button" id="cancelRenderBtn">Cancel</button>
+      <button type="button" id="startRenderBtn">Start Render</button>
+    </form>
+  </div>
+
+  <script>
+    // WebSocket connection to the server
+    let socket;
+    let connectedClients = [];
+    let renderLogs = {};
+    let selectedHostForLogs = '';
+    
+    // DOM Elements
+    const clientsList = document.getElementById('clientsList');
+    const consoleOutput = document.getElementById('consoleOutput');
+    const logHostSelect = document.getElementById('logHostSelect');
+    const syncAllBtn = document.getElementById('syncAllBtn');
+    const renderControlModal = document.getElementById('renderControlModal');
+    
+    // Stats elements
+    const totalMachines = document.getElementById('totalMachines');
+    const onlineMachines = document.getElementById('onlineMachines');
+    const renderingMachines = document.getElementById('renderingMachines');
+    const syncedMachines = document.getElementById('syncedMachines');
+
+    // Connect to WebSocket server
+    function connectWebSocket() {
+      // Use the same host as the current page
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}`;
+      
+      socket = new WebSocket(wsUrl);
+      
+      socket.onopen = () => {
+        console.log('Connected to server');
+        
+        // Register as admin UI
+        socket.send(JSON.stringify({
+          type: 'adminConnect'
+        }));
+      };
+      
+      socket.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        
+        switch (message.type) {
+          case 'clientsList':
+            updateClientsList(message.data);
+            break;
+            
+          case 'renderLogs':
+            updateRenderLogs(message.hostname, message.logs);
+            break;
+        }
+      };
+      
+      socket.onclose = () => {
+        console.log('Disconnected from server, reconnecting...');
+        setTimeout(connectWebSocket, 3000);
+      };
+      
+      socket.onerror = (error) => {
+        console.error('WebSocket error:', error);
+      };
+    }
+    
+    // Update the clients list UI
+    function updateClientsList(clients) {
+      connectedClients = clients;
+      
+      // Update summary stats
+      totalMachines.textContent = clients.length;
+      onlineMachines.textContent = clients.length;
+      renderingMachines.textContent = clients.filter(c => c.isRendering).length;
+      syncedMachines.textContent = clients.filter(c => c.syncStatus === 'synced').length;
+      
+      // Clear and rebuild the clients list
+      clientsList.innerHTML = '';
+      
+      // Update log host selector
+      const currentSelection = logHostSelect.value;
+      logHostSelect.innerHTML = '<option value="">-- Select Machine --</option>';
+      
+      // Show message if no clients
+      if (clients.length === 0) {
+        clientsList.innerHTML = '<p>No machines connected</p>';
+        return;
+      }
+      
+      // Add each client card
+      clients.forEach(client => {
+        // Create option in log selector
+        const option = document.createElement('option');
+        option.value = client.hostname;
+        option.textContent = client.hostname;
+        if (client.hostname === currentSelection) {
+          option.selected = true;
+        }
+        logHostSelect.appendChild(option);
+        
+        // Create client card
+        const clientDiv = document.createElement('div');
+        clientDiv.style.border = '1px solid #ccc';
+        clientDiv.style.padding = '10px';
+        clientDiv.style.margin = '10px 0';
+        
+        // Client header
+        const header = document.createElement('h3');
+        header.textContent = client.hostname;
+        clientDiv.appendChild(header);
+        
+        // Description
+        const description = document.createElement('p');
+        description.textContent = `Description: ${client.description || 'Unknown Machine'}`;
+        clientDiv.appendChild(description);
+        
+        // Houdini versions
+        const houdiniVersions = document.createElement('p');
+        houdiniVersions.textContent = `Houdini Versions: ${formatHoudiniVersions(client.houdiniVersions)}`;
+        clientDiv.appendChild(houdiniVersions);
+        
+        // Status
+        const status = document.createElement('p');
+        status.textContent = `Status: ${client.isRendering ? 'Rendering' : 'Online'} | Sync: ${client.syncStatus || 'Unknown'}`;
+        clientDiv.appendChild(status);
+        
+        // Render progress
+        if (client.isRendering && client.renderProgress) {
+          const progress = document.createElement('p');
+          const current = client.renderProgress.currentFrame || 0;
+          const total = client.renderProgress.totalFrames || 1;
+          progress.textContent = `Rendering frame ${current} of ${total}`;
+          clientDiv.appendChild(progress);
+        }
+        
+        // Buttons
+        const btnDiv = document.createElement('div');
+        
+        // Start render button
+        const startBtn = document.createElement('button');
+        startBtn.textContent = 'Start Render';
+        startBtn.addEventListener('click', () => showRenderModal(client.hostname));
+        btnDiv.appendChild(startBtn);
+        
+        // Stop render button (if rendering)
+        if (client.isRendering) {
+          const stopBtn = document.createElement('button');
+          stopBtn.textContent = 'Stop Render';
+          stopBtn.addEventListener('click', () => stopRender(client.hostname));
+          btnDiv.appendChild(stopBtn);
+        }
+        
+        // View logs button
+        const viewLogsBtn = document.createElement('button');
+        viewLogsBtn.textContent = 'View Logs';
+        viewLogsBtn.addEventListener('click', () => {
+          logHostSelect.value = client.hostname;
+          selectedHostForLogs = client.hostname;
+          updateConsoleOutput();
+        });
+        btnDiv.appendChild(viewLogsBtn);
+        
+        clientDiv.appendChild(btnDiv);
+        clientsList.appendChild(clientDiv);
+      });
+    }
+    
+    // Format Houdini versions for display
+    function formatHoudiniVersions(versions) {
+      if (!versions || versions.length === 0 || versions[0] === 'none') {
+        return 'None installed';
+      }
+      
+      return versions.map(v => {
+        // Extract just the version number from the path
+        const match = v.match(/Houdini\s*(\d+\.\d+\.\d+)/i);
+        return match ? match[1] : v;
+      }).join(', ');
+    }
+    
+    // Update render logs UI
+    function updateRenderLogs(hostname, logs) {
+      renderLogs[hostname] = logs;
+      
+      // If this is the currently selected host, update the display
+      if (hostname === selectedHostForLogs) {
+        updateConsoleOutput();
+      }
+    }
+    
+    // Update console output display
+    function updateConsoleOutput() {
+      if (!selectedHostForLogs || !renderLogs[selectedHostForLogs]) {
+        consoleOutput.innerHTML = '<p>No logs available for selected machine</p>';
+        return;
+      }
+      
+      const logs = renderLogs[selectedHostForLogs];
+      
+      consoleOutput.innerHTML = logs.map(log => {
+        return `<div>[${new Date(log.time).toLocaleTimeString()}] ${escapeHtml(log.message)}</div>`;
+      }).join('');
+      
+      // Scroll to bottom
+      consoleOutput.scrollTop = consoleOutput.scrollHeight;
+    }
+    
+    // Helper to escape HTML
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+    
+    // Show render modal for a specific host
+    function showRenderModal(hostname) {
+      const client = connectedClients.find(c => c.hostname === hostname);
+      if (!client) return;
+      
+      // Set hostname in modal
+      document.getElementById('renderMachineName').textContent = hostname;
+      document.getElementById('renderHostname').value = hostname;
+      
+      // Populate Houdini version dropdown
+      const versionSelect = document.getElementById('houdiniVersion');
+      versionSelect.innerHTML = '';
+      
+      if (client.houdiniVersions && client.houdiniVersions.length > 0 && client.houdiniVersions[0] !== 'none') {
+        client.houdiniVersions.forEach(version => {
+          const option = document.createElement('option');
+          option.value = version;
+          option.textContent = version;
+          versionSelect.appendChild(option);
+        });
+      } else {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'No Houdini versions available';
+        option.disabled = true;
+        option.selected = true;
+        versionSelect.appendChild(option);
+      }
+      
+      renderControlModal.style.display = 'block';
+    }
+    
+    // Start a render on a host
+    function startRender(hostname) {
+      const houdiniPath = document.getElementById('houdiniVersion').value;
+      const scenePath = document.getElementById('scenePath').value;
+      const outputPath = document.getElementById('outputPath').value;
+      const frameStart = parseInt(document.getElementById('frameStart').value);
+      const frameEnd = parseInt(document.getElementById('frameEnd').value);
+      
+      if (!hostname || !houdiniPath || !scenePath || !outputPath || isNaN(frameStart) || isNaN(frameEnd)) {
+        alert('Please fill in all required fields');
+        return;
+      }
+      
+      socket.send(JSON.stringify({
+        type: 'startRender',
+        hostname: hostname,
+        houdiniPath: houdiniPath,
+        scenePath: scenePath,
+        outputPath: outputPath,
+        frames: [frameStart, frameEnd]
+      }));
+      
+      renderControlModal.style.display = 'none';
+    }
+    
+    // Stop a render on a host
+    function stopRender(hostname) {
+      if (!confirm(`Are you sure you want to stop the render on ${hostname}?`)) {
+        return;
+      }
+      
+      socket.send(JSON.stringify({
+        type: 'stopRender',
+        hostname: hostname
+      }));
+    }
+    
+    // Sync all clients
+    function syncAllClients() {
+      if (!confirm('Sync all clients with files from the main client?')) {
+        return;
+      }
+      
+      socket.send(JSON.stringify({
+        type: 'syncAllClients',
+        directoryPath: 'C:/renderfarm/sequence1-10/'
+      }));
+    }
+    
+    // Initialize when page loads
+    document.addEventListener('DOMContentLoaded', () => {
+      // Connect to WebSocket server
+      connectWebSocket();
+      
+      // Set up event listeners
+      logHostSelect.addEventListener('change', (e) => {
+        selectedHostForLogs = e.target.value;
+        updateConsoleOutput();
+      });
+      
+      syncAllBtn.addEventListener('click', syncAllClients);
+      
+      document.getElementById('startRenderBtn').addEventListener('click', () => {
+        const hostname = document.getElementById('renderHostname').value;
+        startRender(hostname);
+      });
+
+      document.getElementById('cancelRenderBtn').addEventListener('click', () => {
+        renderControlModal.style.display = 'none';
+      });
+    });
+  </script>
+</body>
+</html>
