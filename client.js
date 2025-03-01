@@ -7,7 +7,7 @@ const crypto = require('crypto');
 
 // Configuration
 const renderfarmDirectory = 'C:/renderfarm/sequence1-10/';
-const serverUrl = 'ws://localhost:3000'; // Change to your server address
+const serverUrl = 'ws://https://farmmanager-jcc0.onrender.com/'; // Change to your server address
 const reconnectInterval = 5000; // 5 seconds between reconnection attempts
 
 // Generate session ID based on hostname and random string
