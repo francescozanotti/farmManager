@@ -6,7 +6,7 @@ const { spawn } = require('child_process');
 const crypto = require('crypto');
 
 // Configuration
-const renderfarmDirectory = 'C:/renderfarm/sequence1-10/';
+const renderfarmDirectory = 'C:/renderfarm/';
 const serverUrl = 'wss://farmmanager-jcc0.onrender.com/'; // Change to your server address
 const reconnectInterval = 5000; // 5 seconds between reconnection attempts
 
