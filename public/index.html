@@ -27,12 +27,16 @@
   </div>
 
   <div>
-    <h2>Render Logs</h2>
+    <h2>Logs</h2>
     <select id="logHostSelect">
       <option value="">-- Select Machine --</option>
     </select>
+    <select id="logTypeSelect">
+      <option value="render">Render Logs</option>
+      <option value="sync">Sync Logs</option>
+    </select>
     <div id="consoleOutput" style="height: 300px; overflow-y: auto; background-color: #000; color: #fff; font-family: monospace;">
-      <p>Select a machine to view render logs</p>
+      <p>Select a machine to view logs</p>
     </div>
   </div>
 
@@ -78,7 +82,9 @@
     let socket;
     let connectedClients = [];
     let renderLogs = {};
+    let syncLogs = {};
     let selectedHostForLogs = '';
+    let selectedLogType = 'render';
     
     // DOM Elements
     const clientsList = document.getElementById('clientsList');
@@ -120,6 +126,10 @@
             
           case 'renderLogs':
             updateRenderLogs(message.hostname, message.logs);
+            break;
+            
+          case 'syncLogs':
+            updateSyncLogs(message.hostname, message.logs);
             break;
         }
       };
@@ -252,20 +262,44 @@
     function updateRenderLogs(hostname, logs) {
       renderLogs[hostname] = logs;
       
-      // If this is the currently selected host, update the display
-      if (hostname === selectedHostForLogs) {
+      // If this is the currently selected host and we're viewing render logs, update the display
+      if (hostname === selectedHostForLogs && selectedLogType === 'render') {
+        updateConsoleOutput();
+      }
+    }
+    
+    // Update sync logs UI
+    function updateSyncLogs(hostname, logs) {
+      syncLogs[hostname] = logs;
+      
+      // If this is the currently selected host and we're viewing sync logs, update the display
+      if (hostname === selectedHostForLogs && selectedLogType === 'sync') {
         updateConsoleOutput();
       }
     }
     
     // Update console output display
     function updateConsoleOutput() {
-      if (!selectedHostForLogs || !renderLogs[selectedHostForLogs]) {
-        consoleOutput.innerHTML = '<p>No logs available for selected machine</p>';
+      if (!selectedHostForLogs) {
+        consoleOutput.innerHTML = '<p>No machine selected</p>';
         return;
       }
       
-      const logs = renderLogs[selectedHostForLogs];
+      let logs;
+      
+      if (selectedLogType === 'render') {
+        logs = renderLogs[selectedHostForLogs];
+        if (!logs) {
+          consoleOutput.innerHTML = '<p>No render logs available for selected machine</p>';
+          return;
+        }
+      } else if (selectedLogType === 'sync') {
+        logs = syncLogs[selectedHostForLogs];
+        if (!logs) {
+          consoleOutput.innerHTML = '<p>No sync logs available for selected machine</p>';
+          return;
+        }
+      }
       
       consoleOutput.innerHTML = logs.map(log => {
         return `<div>[${new Date(log.time).toLocaleTimeString()}] ${escapeHtml(log.message)}</div>`;
@@ -371,6 +405,11 @@
       // Set up event listeners
       logHostSelect.addEventListener('change', (e) => {
         selectedHostForLogs = e.target.value;
+        updateConsoleOutput();
+      });
+      
+      document.getElementById('logTypeSelect').addEventListener('change', (e) => {
+        selectedLogType = e.target.value;
         updateConsoleOutput();
       });
       

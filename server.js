@@ -33,6 +33,7 @@ const machineDetails = {
 // Storage for connected clients and their render status
 const connectedClients = {};
 const renderLogs = {};
+const syncLogs = {};
 
 // Get machine details or provide defaults
 function getMachineDetails(hostname) {
@@ -78,6 +79,19 @@ function broadcastRenderLogs(hostname, logs) {
     if (client.readyState === WebSocket.OPEN && client.isAdmin) {
       client.send(JSON.stringify({ 
         type: 'renderLogs', 
+        hostname: hostname,
+        logs: logs
+      }));
+    }
+  });
+}
+
+// Send sync logs to all connected admin clients
+function broadcastSyncLogs(hostname, logs) {
+  wss.clients.forEach(client => {
+    if (client.readyState === WebSocket.OPEN && client.isAdmin) {
+      client.send(JSON.stringify({ 
+        type: 'syncLogs', 
         hostname: hostname,
         logs: logs
       }));
@@ -164,6 +178,29 @@ wss.on('connection', (ws, req) => {
           broadcastClients();
           break;
           
+        case 'syncLog':
+          const { hostname: syncHost, log: syncLogMessage } = data;
+          
+          // Initialize logs array if it doesn't exist
+          if (!syncLogs[syncHost]) {
+            syncLogs[syncHost] = [];
+          }
+          
+          // Add log entry with timestamp
+          syncLogs[syncHost].push({
+            time: new Date().toISOString(),
+            message: syncLogMessage
+          });
+          
+          // Keep only the last 500 log entries
+          if (syncLogs[syncHost].length > 500) {
+            syncLogs[syncHost] = syncLogs[syncHost].slice(-500);
+          }
+          
+          // Broadcast logs to admin clients
+          broadcastSyncLogs(syncHost, syncLogs[syncHost]);
+          break;
+          
         case 'startRender':
           // Find client with matching hostname
           const targetClient = Object.values(connectedClients).find(
@@ -187,44 +224,91 @@ wss.on('connection', (ws, req) => {
           break;
           
         case 'syncAllClients':
-          // Find the main client (POPPI)
+          // First sync from the main client to all others
           const mainClient = Object.values(connectedClients).find(
             client => getMachineDetails(client.hostname).isMainClient
           );
           
           if (!mainClient) {
             console.log('Main client (POPPI) not connected, cannot sync');
+            // Notify admin UI
+            if (ws.isAdmin) {
+              ws.send(JSON.stringify({
+                type: 'syncLogs',
+                hostname: 'SERVER',
+                logs: [{
+                  time: new Date().toISOString(),
+                  message: 'Main client (POPPI) not connected, cannot sync'
+                }]
+              }));
+            }
             break;
           }
           
-          // Request file list from main client
-          mainClient.ws.send(JSON.stringify({
-            type: 'getFileList',
-            directoryPath: data.directoryPath
-          }));
+          console.log(`Starting bi-directional sync for all clients using directory: ${data.directoryPath}`);
+          
+          // Request file list from every client - we'll do a complete sync in both directions
+          Object.values(connectedClients).forEach(client => {
+            if (client.ws.readyState === WebSocket.OPEN) {
+              client.ws.send(JSON.stringify({
+                type: 'getFileList',
+                directoryPath: data.directoryPath,
+                isBidirectional: true
+              }));
+              
+              // Update sync status
+              client.syncStatus = 'syncing';
+            }
+          });
+          
+          broadcastClients();
           break;
           
         case 'fileList':
-          // Main client has sent its file list, now sync to other clients
+          // A client has sent its file list, sync with other clients
           const sourceFiles = data.files;
           const sourcePath = data.directoryPath;
+          const sourceHost = data.hostname;
+          const isBidirectional = data.isBidirectional || false;
           
-          // For each connected client that's not the main one
-          Object.values(connectedClients).forEach(client => {
-            const machineInfo = getMachineDetails(client.hostname);
+          console.log(`Received file list from ${sourceHost} with ${sourceFiles.length} files`);
+          
+          // Track which clients we need to sync to
+          const targetClients = Object.values(connectedClients).filter(client => {
+            // Don't sync to self
+            if (client.hostname === sourceHost) return false;
             
-            // Skip the main client itself
-            if (machineInfo.isMainClient) return;
+            // If bidirectional, sync to everyone including main
+            if (isBidirectional) return true;
             
+            // If not bidirectional, only sync from main to others
+            const sourceIsMain = getMachineDetails(sourceHost).isMainClient;
+            return sourceIsMain;
+          });
+          
+          // Log the sync operation
+          if (ws.isAdmin) {
+            ws.send(JSON.stringify({
+              type: 'syncLogs',
+              hostname: 'SERVER',
+              logs: [{
+                time: new Date().toISOString(),
+                message: `Syncing ${sourceFiles.length} files from ${sourceHost} to ${targetClients.length} clients`
+              }]
+            }));
+          }
+          
+          // Send files to each target client
+          targetClients.forEach(client => {
             if (client.ws.readyState === WebSocket.OPEN) {
               client.ws.send(JSON.stringify({
                 type: 'syncFiles',
-                sourceHost: data.hostname,
+                sourceHost: sourceHost,
                 files: sourceFiles,
                 sourcePath: sourcePath
               }));
               
-              console.log(`Sync command sent to ${client.hostname}`);
+              console.log(`Sync command sent from ${sourceHost} to ${client.hostname}`);
               client.syncStatus = 'syncing';
             }
           });

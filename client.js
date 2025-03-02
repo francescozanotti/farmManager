@@ -7,7 +7,7 @@ const crypto = require('crypto');
 
 // Configuration
 const renderfarmDirectory = 'C:/renderfarm/';
-const serverUrl = 'wss://farmmanager-jcc0.onrender.com/'; // Change to your server address
+const serverUrl = 'wss://farmmanager-jcc0.onrender.com'; // Change to your server address
 const reconnectInterval = 5000; // 5 seconds between reconnection attempts
 
 // Generate session ID based on hostname and random string
@@ -20,6 +20,7 @@ let isConnected = false;
 let isRendering = false;
 let currentRenderProcess = null;
 let reconnectTimeout;
+let pendingFiles = new Set(); // Track files still being synced
 
 // Ensure render directory exists
 if (!fs.existsSync(renderfarmDirectory)) {
@@ -170,17 +171,20 @@ function handleServerMessage(message) {
         
       case 'getFileList':
         // Server is requesting our file list for sync purposes
+        sendSyncLog(`Server requested file list for directory: ${data.directoryPath}`);
         const files = getDirectoryContents(data.directoryPath);
         sendMessage({
           type: 'fileList',
           hostname: hostname,
           directoryPath: data.directoryPath,
-          files: files
+          files: files,
+          isBidirectional: data.isBidirectional
         });
+        sendSyncLog(`Sent list of ${files.length} files to server`);
         break;
         
       case 'syncFiles':
-        // Server wants us to sync files from the main client
+        // Server wants us to sync files from another client
         syncFilesFromSource(data.sourceHost, data.sourcePath, data.files);
         break;
         
@@ -190,18 +194,34 @@ function handleServerMessage(message) {
         break;
         
       case 'receiveFile':
-        // Server is forwarding a file from the main client
+        // Server is forwarding a file from another client
         saveReceivedFile(data.filePath, data.fileData);
+        
+        // Check if this was the last file to complete the sync
+        if (pendingFiles.has(data.filePath)) {
+          pendingFiles.delete(data.filePath);
+          
+          if (pendingFiles.size === 0) {
+            sendSyncLog('Sync complete - all files received');
+            sendMessage({
+              type: 'syncResult',
+              sessionId: sessionId,
+              success: true,
+              message: 'Sync complete'
+            });
+          }
+        }
         break;
     }
   } catch (error) {
     console.error(`Error handling message: ${error.message}`);
+    sendSyncLog(`Error: ${error.message}`);
   }
 }
 
 // Sync files from source host
 function syncFilesFromSource(sourceHost, sourcePath, files) {
-  console.log(`Starting sync from ${sourceHost}`);
+  sendSyncLog(`Starting sync from ${sourceHost}`);
   
   // Update sync status
   sendMessage({
@@ -223,8 +243,9 @@ function syncFilesFromSource(sourceHost, sourcePath, files) {
     if (!fs.existsSync(localDir)) {
       try {
         fs.mkdirSync(localDir, { recursive: true });
+        sendSyncLog(`Created directory: ${localDir}`);
       } catch (error) {
-        console.error(`Error creating directory ${localDir}: ${error.message}`);
+        sendSyncLog(`Error creating directory ${localDir}: ${error.message}`);
         continue;
       }
     }
@@ -256,7 +277,7 @@ function syncFilesFromSource(sourceHost, sourcePath, files) {
   
   // If no files need updating, we're done
   if (requestedFiles.size === 0) {
-    console.log('No files need updating');
+    sendSyncLog('No files need updating - sync complete');
     sendMessage({
       type: 'syncResult',
       sessionId: sessionId,
@@ -264,7 +285,7 @@ function syncFilesFromSource(sourceHost, sourcePath, files) {
       message: 'All files are up to date'
     });
   } else {
-    console.log(`Requested ${requestedFiles.size} files for sync`);
+    sendSyncLog(`Requested ${requestedFiles.size} files for sync`);
   }
 }
 
@@ -284,9 +305,9 @@ function sendFileToClient(filePath, requestingHost) {
       fileData: fileData.toString('base64')
     });
     
-    console.log(`Sent file ${filePath} to ${requestingHost}`);
+    sendSyncLog(`Sent file ${filePath} to ${requestingHost}`);
   } catch (error) {
-    console.error(`Error sending file ${filePath}: ${error.message}`);
+    sendSyncLog(`Error sending file ${filePath}: ${error.message}`);
   }
 }
 
@@ -299,12 +320,13 @@ function saveReceivedFile(filePath, fileData) {
     // Ensure directory exists
     if (!fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true });
+      sendSyncLog(`Created directory: ${dirPath}`);
     }
     
     // Write file data (decode from base64)
     fs.writeFileSync(fullPath, Buffer.from(fileData, 'base64'));
     
-    console.log(`Saved file ${filePath}`);
+    sendSyncLog(`Saved file: ${filePath}`);
     
     // Send sync status update
     sendMessage({
@@ -314,7 +336,7 @@ function saveReceivedFile(filePath, fileData) {
       message: `Synced ${filePath}`
     });
   } catch (error) {
-    console.error(`Error saving file ${filePath}: ${error.message}`);
+    sendSyncLog(`Error saving file ${filePath}: ${error.message}`);
     
     sendMessage({
       type: 'syncResult',
@@ -462,6 +484,17 @@ function sendRenderLog(message) {
   
   sendMessage({
     type: 'renderLog',
+    hostname: hostname,
+    log: message
+  });
+}
+
+// Send a log message related to file syncing
+function sendSyncLog(message) {
+  console.log(`[SYNC] ${message}`);
+  
+  sendMessage({
+    type: 'syncLog',
     hostname: hostname,
     log: message
   });
