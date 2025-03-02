@@ -108,9 +108,58 @@ wss.on('connection', (ws, req) => {
   
   ws.on('message', (message) => {
     try {
-      const data = JSON.parse(message);
+        const data = JSON.parse(message);
       
-      switch(data.type) {
+        switch(data.type) {
+
+        // Add this case handler in your server.js message handling switch statement:
+
+        case 'requestFileHash':
+            // A client is requesting a file hash to compare before sending the full file
+            const filePathForHash = data.filePath;
+            const requestingClientForHash = data.requestingHost;
+            const localHash = data.localHash;
+            
+            // Find source client
+            const sourceClientForHash = Object.values(connectedClients).find(
+                client => client.hostname === data.sourceHost
+            );
+            
+            if (sourceClientForHash && sourceClientForHash.ws.readyState === WebSocket.OPEN) {
+                sourceClientForHash.ws.send(JSON.stringify({
+                    type: 'calculateFileHash',
+                    filePath: filePathForHash,
+                    requestingHost: requestingClientForHash,
+                    localHash: localHash
+                }));
+            }
+            break;
+        
+        case 'fileHashResult':
+            // Forward hash comparison result to the requesting client
+            const targetClientForHash = Object.values(connectedClients).find(
+                client => client.hostname === data.requestingHost
+            );
+            
+            if (targetClientForHash && targetClientForHash.ws.readyState === WebSocket.OPEN) {
+                targetClientForHash.ws.send(JSON.stringify({
+                    type: 'fileHashResult',
+                    filePath: data.filePath,
+                    matches: data.matches
+                }));
+            
+                // If files don't match, initiate a file request
+                if (!data.matches) {
+                    targetClientForHash.ws.send(JSON.stringify({
+                        type: 'hashMismatch',
+                        sourcePath: data.filePath,
+                        sourceHost: data.sourceHost
+                        }));
+                }
+            }
+            break;
+
+
         case 'adminConnect':
           ws.isAdmin = true;
           console.log('Admin UI connected');

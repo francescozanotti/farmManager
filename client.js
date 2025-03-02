@@ -212,6 +212,42 @@ function handleServerMessage(message) {
           }
         }
         break;
+      case 'calculateFileHash':
+        // Calculate hash for a file and report if it matches the hash from the requesting client
+        calculateAndReturnFileHash(
+            data.filePath, 
+            data.requestingHost, 
+            data.localHash
+        );
+        break;
+
+      case 'fileHashResult':
+        // Results of hash comparison
+        sendSyncLog(`Hash comparison for ${data.filePath}: ${data.matches ? 'Matches' : 'Different'}`);
+        
+        // If files match, we can remove from pendingFiles if it was waiting
+        if (data.matches && pendingFiles.has(data.filePath)) {
+            pendingFiles.delete(data.filePath);
+            sendSyncLog(`File ${data.filePath} is identical, skipping transfer`);
+        }
+        break;
+
+      case 'hashMismatch':
+        // File hashes don't match, request the file
+        sendMessage({
+            type: 'requestFile',
+            sourceHost: data.sourceHost,
+            requestingHost: hostname,
+            filePath: data.sourcePath
+        });
+        
+        // Add to pending files if not already there
+        if (!pendingFiles.has(data.sourcePath)) {
+            pendingFiles.add(data.sourcePath);
+        }
+        
+        sendSyncLog(`Requesting ${data.sourcePath} after hash mismatch`);
+        break;
     }
   } catch (error) {
     console.error(`Error handling message: ${error.message}`);
@@ -222,71 +258,131 @@ function handleServerMessage(message) {
 // Sync files from source host
 function syncFilesFromSource(sourceHost, sourcePath, files) {
     sendSyncLog(`Starting sync from ${sourceHost}`);
-    
+
     // Update sync status
     sendMessage({
-      type: 'syncResult',
-      sessionId: sessionId,
-      success: true,
-      message: 'Sync started'
+        type: 'syncResult',
+        sessionId: sessionId,
+        success: true,
+        message: 'Sync started'
     });
-    
+
     // Create a list to track requested files
     const requestedFiles = new Set();
     pendingFiles = new Set(); // Reset pending files
-    
+
+    // Log problematic extensions
+    const extensionStats = {};
+
     // Process each file
     for (const file of files) {
-      const localPath = path.join(renderfarmDirectory, file.path);
-      const localDir = path.dirname(localPath);
-      
-      // Create directory if it doesn't exist
-      if (!fs.existsSync(localDir)) {
-        try {
-          fs.mkdirSync(localDir, { recursive: true });
-          sendSyncLog(`Created directory: ${localDir}`);
-        } catch (error) {
-          sendSyncLog(`Error creating directory ${localDir}: ${error.message}`);
-          continue;
-        }
-      }
-      
-      // Check if we need to request this file - ONLY COMPARE SIZE
-      let needsUpdate = true;
-      
-      if (fs.existsSync(localPath)) {
-        const stats = fs.statSync(localPath);
+        const localPath = path.join(renderfarmDirectory, file.path);
+        const localDir = path.dirname(localPath);
+        const fileExt = path.extname(file.path).toLowerCase();
         
-        // If same size, skip (not checking modification time)
-        if (stats.size === file.size) {
-          needsUpdate = false;
+        // Track extensions for debugging
+        if (!extensionStats[fileExt]) {
+        extensionStats[fileExt] = { total: 0, needsUpdate: 0 };
         }
-      }
-      
-      if (needsUpdate) {
+        extensionStats[fileExt].total++;
+        
+        // Create directory if it doesn't exist
+        if (!fs.existsSync(localDir)) {
+        try {
+            fs.mkdirSync(localDir, { recursive: true });
+            sendSyncLog(`Created directory: ${localDir}`);
+        } catch (error) {
+            sendSyncLog(`Error creating directory ${localDir}: ${error.message}`);
+            continue;
+        }
+        }
+        
+        // Check if we need to request this file - ONLY COMPARE SIZE
+        let needsUpdate = true;
+        let skipReason = "File doesn't exist locally";
+        
+        if (fs.existsSync(localPath)) {
+        try {
+            const stats = fs.statSync(localPath);
+            
+            // Debug problematic file types
+            if (fileExt === '.hiplc' || fileExt === '.usd') {
+            sendSyncLog(`File comparison for ${file.path}: Local size=${stats.size}, Remote size=${file.size}`);
+            }
+            
+            // If same size, skip (not checking modification time)
+            if (stats.size === file.size) {
+            needsUpdate = false;
+            skipReason = "Same size";
+            } else {
+            skipReason = `Different size: local=${stats.size}, remote=${file.size}`;
+            }
+        } catch (error) {
+            sendSyncLog(`Error comparing file ${localPath}: ${error.message}`);
+            skipReason = "Error reading local file";
+        }
+        }
+        
+        // Special handling for .hiplc and .usd files - force to use exact byte comparison
+        if (needsUpdate && (fileExt === '.hiplc' || fileExt === '.usd') && fs.existsSync(localPath)) {
+        try {
+            // For these problematic files, do a more thorough check
+            const localContent = fs.readFileSync(localPath);
+            const localHash = crypto.createHash('md5').update(localContent).digest('hex');
+            sendSyncLog(`Special handling for ${file.path}: Using hash comparison`);
+            
+            // Request file hash instead of the full file
+            sendMessage({
+            type: 'requestFileHash',
+            sourceHost: sourceHost,
+            requestingHost: hostname,
+            filePath: file.path,
+            localHash: localHash
+            });
+            
+            // We'll decide later if we need the file, once we get the hash response
+            needsUpdate = false;
+            skipReason = "Using hash comparison instead";
+        } catch (error) {
+            sendSyncLog(`Error in special handling for ${file.path}: ${error.message}`);
+        }
+        }
+        
+        if (needsUpdate) {
         // Request the file from source host
         requestedFiles.add(file.path);
         pendingFiles.add(file.path); // Track pending files
+        
+        extensionStats[fileExt].needsUpdate++;
+        
         sendMessage({
-          type: 'requestFile',
-          sourceHost: sourceHost,
-          requestingHost: hostname,
-          filePath: file.path
+            type: 'requestFile',
+            sourceHost: sourceHost,
+            requestingHost: hostname,
+            filePath: file.path
         });
-      }
+        } else if (fileExt === '.hiplc' || fileExt === '.usd') {
+        sendSyncLog(`Skipped ${file.path}: ${skipReason}`);
+        }
     }
-    
+
+    // Log stats by extension
+    sendSyncLog("Sync statistics by extension:");
+    for (const ext in extensionStats) {
+        sendSyncLog(`${ext}: ${extensionStats[ext].needsUpdate} of ${extensionStats[ext].total} files need update`);
+    }
+
     // If no files need updating, we're done
     if (requestedFiles.size === 0) {
-      sendSyncLog('No files need updating - sync complete');
-      sendMessage({
+        sendSyncLog('No files need updating - sync complete');
+        sendMessage({
         type: 'syncResult',
         sessionId: sessionId,
         success: true,
         message: 'All files are up to date'
-      });
+        });
     } else {
-      sendSyncLog(`Requested ${requestedFiles.size} files for sync`);
+        sendSyncLog(`Requested ${requestedFiles.size} files for sync`);
     }
 }
 
@@ -510,6 +606,52 @@ function sendMessage(message) {
   } catch (error) {
     console.error(`Error sending message: ${error.message}`);
   }
+}
+
+function calculateAndReturnFileHash(filePath, requestingHost, localHash) {
+    const fullPath = path.join(renderfarmDirectory, filePath);
+
+    try {
+        if (!fs.existsSync(fullPath)) {
+        // File doesn't exist, so definitely doesn't match
+        sendMessage({
+            type: 'fileHashResult',
+            requestingHost: requestingHost,
+            filePath: filePath,
+            matches: false,
+            sourceHost: hostname
+        });
+        return;
+        }
+        
+        // Read file and calculate hash
+        const fileContent = fs.readFileSync(fullPath);
+        const fileHash = crypto.createHash('md5').update(fileContent).digest('hex');
+        
+        // Compare with provided hash
+        const matches = (fileHash === localHash);
+        
+        sendMessage({
+        type: 'fileHashResult',
+        requestingHost: requestingHost,
+        filePath: filePath,
+        matches: matches,
+        sourceHost: hostname
+        });
+        
+        sendSyncLog(`Calculated hash for ${filePath}: ${matches ? 'Matches' : 'Different'} from requester`);
+    } catch (error) {
+        sendSyncLog(`Error calculating hash for ${filePath}: ${error.message}`);
+        
+        // Report as not matching on error
+        sendMessage({
+        type: 'fileHashResult',
+        requestingHost: requestingHost,
+        filePath: filePath,
+        matches: false,
+        sourceHost: hostname
+        });
+    }
 }
 
 // Start the client
