@@ -248,6 +248,43 @@ function handleServerMessage(message) {
         
         sendSyncLog(`Requesting ${data.sourcePath} after hash mismatch`);
         break;
+
+      case 'getCompFiles':
+        // Server is requesting list of .comp files
+        sendSyncLog(`Server requested .comp files from directory: ${data.directoryPath}`);
+        const compFiles = getFilesByExtension(data.directoryPath, '.comp');
+        sendMessage({
+            type: 'compFiles',
+            sessionId: sessionId,
+            files: compFiles
+        });
+        sendSyncLog(`Sent list of ${compFiles.length} .comp files to server`);
+        break;
+        
+      case 'getMp4Files':
+        // Server is requesting list of MP4 files
+        sendSyncLog(`Server requested MP4 files from directory: ${data.directoryPath}`);
+        const mp4Files = getFilesByExtension(data.directoryPath, '.mp4');
+        sendMessage({
+            type: 'mp4Files',
+            sessionId: sessionId,
+            files: mp4Files
+        });
+        sendSyncLog(`Sent list of ${mp4Files.length} MP4 files to server`);
+        break;
+        
+      case 'streamFile':
+        // Server is requesting to stream a file
+        sendSyncLog(`Server requested to stream file: ${data.filePath}`);
+        streamFile(data.filePath);
+        break;
+        
+      case 'startCompositing':
+        // Start compositing with the specified comp file
+        startCompositing(data.compFile);
+        break;
+
+
     }
   } catch (error) {
     console.error(`Error handling message: ${error.message}`);
@@ -652,6 +689,193 @@ function calculateAndReturnFileHash(filePath, requestingHost, localHash) {
         sourceHost: hostname
         });
     }
+}
+
+//compositing and streaming
+
+// Get files with specific extension from a directory
+function getFilesByExtension(dirPath, extension) {
+  try {
+    const result = [];
+    
+    if (!fs.existsSync(dirPath)) {
+      return result;
+    }
+    
+    const items = fs.readdirSync(dirPath);
+    
+    for (const item of items) {
+      const itemPath = path.join(dirPath, item);
+      const stats = fs.statSync(itemPath);
+      
+      if (stats.isFile() && path.extname(item).toLowerCase() === extension.toLowerCase()) {
+        result.push({
+          filename: item,
+          path: itemPath,
+          size: stats.size,
+          mtime: stats.mtime
+        });
+      }
+    }
+    
+    return result;
+  } catch (error) {
+    console.error(`Error reading directory ${dirPath}: ${error.message}`);
+    return [];
+  }
+}
+  
+// Stream a file to the server
+function streamFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      sendMessage({
+        type: 'streamData',
+        sessionId: sessionId,
+        error: 'File not found'
+      });
+      return;
+    }
+    
+    // Read file as binary data
+    const fileData = fs.readFileSync(filePath);
+    
+    // Send file data to server (encoded as base64)
+    sendMessage({
+      type: 'streamData',
+      sessionId: sessionId,
+      data: fileData.toString('base64')
+    });
+    
+    sendSyncLog(`Streamed file ${filePath} to server`);
+  } catch (error) {
+    sendSyncLog(`Error streaming file ${filePath}: ${error.message}`);
+    sendMessage({
+      type: 'streamData',
+      sessionId: sessionId,
+      error: error.message
+    });
+  }
+}
+  
+  // Start the compositing process
+function startCompositing(compFile) {
+  if (isRendering) {
+    sendRenderLog('Already rendering, cannot start compositing');
+    return;
+  }
+  
+  sendRenderLog(`Starting compositing for: ${compFile}`);
+  
+  // Mark as rendering
+  isRendering = true;
+  
+  // Ensure output directory exists
+  const outputDir = path.join(renderfarmDirectory, 'comped');
+  if (!fs.existsSync(outputDir)) {
+    try {
+      fs.mkdirSync(outputDir, { recursive: true });
+    } catch (error) {
+      sendRenderLog(`Error creating output directory: ${error.message}`);
+      isRendering = false;
+      return;
+    }
+  }
+  
+  // Extract frames from comp filename (assuming format like "sequence1-10.comp")
+  let startFrame = 1;
+  let endFrame = 10;
+  const match = compFile.match(/sequence(\d+)-(\d+)\.comp/i);
+  if (match) {
+    startFrame = parseInt(match[1]);
+    endFrame = parseInt(match[2]);
+  }
+  
+  // Prepare the PowerShell command
+  const compFilePath = path.join(renderfarmDirectory, compFile);
+  const sequenceName = path.basename(compFile, '.comp');
+  
+  // PowerShell script
+  const psScript = `
+    $renderNodePath = "C:\\Program Files\\Blackmagic Design\\Fusion Render Node 18\\FusionRenderNode.exe"
+    $compFile = "${compFilePath.replace(/\\/g, '\\\\')}"
+    $startFrame = ${startFrame}
+    $endFrame = ${endFrame}
+    $outputDir = "${outputDir.replace(/\\/g, '\\\\')}"
+    $outputFile = Join-Path $outputDir "${sequenceName}.mp4"
+
+    Write-Output "Starting compositing for $compFile"
+    Write-Output "Frame range: $startFrame to $endFrame"
+    
+    # Delete old MP4 output if it exists
+    if (Test-Path -Path $outputFile) {
+        Write-Output "Removing existing output file..."
+        Remove-Item -Path $outputFile -Force
+    }
+    
+    # Construct the Fusion render command
+    $arguments = @(
+        "\`"$compFile\`"",
+        "/render",
+        "/start $startFrame",
+        "/end $endFrame",
+        "/frames $startFrame-$endFrame",
+        "/verbose",
+        "/quit"
+    )
+    
+    # Execute Fusion Render Node
+    Write-Output "Running Fusion Render Node..."
+    & "$renderNodePath" $arguments
+    
+    # Check if MP4 file was created
+    if (Test-Path -Path $outputFile) {
+        Write-Output "Compositing completed: $outputFile"
+    } else {
+        Write-Output "Error: Fusion did not create output MP4! Check Saver node settings."
+    }
+  `;
+  
+  // Create a temporary ps1 script file
+  const scriptPath = path.join(os.tmpdir(), `compose_${Date.now()}.ps1`);
+  fs.writeFileSync(scriptPath, psScript);
+  
+  // Execute PowerShell script
+  const process = spawn('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-File', scriptPath]);
+  
+  // Handle process output
+  process.stdout.on('data', (data) => {
+    const output = data.toString().trim();
+    if (output) sendRenderLog(output);
+  });
+  
+  process.stderr.on('data', (data) => {
+    const output = data.toString().trim();
+    if (output) sendRenderLog(`ERROR: ${output}`);
+  });
+  
+  // Handle process completion
+  process.on('close', (code) => {
+    if (code === 0) {
+      sendRenderLog(`Compositing completed successfully`);
+    } else {
+      sendRenderLog(`Compositing failed with code ${code}`);
+    }
+    
+    // Clean up temp script
+    try {
+      fs.unlinkSync(scriptPath);
+    } catch (err) {
+      console.error(`Error removing temp script: ${err.message}`);
+    }
+    
+    isRendering = false;
+  });
+  
+  process.on('error', (err) => {
+    sendRenderLog(`Process error: ${err.message}`);
+    isRendering = false;
+  });
 }
 
 // Start the client

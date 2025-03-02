@@ -40,6 +40,34 @@
     </div>
   </div>
 
+  
+  <div>
+    <h2>Compositing Controls</h2>
+    <div id="compositingControls" style="display: none;">
+      <div>
+        <label for="compFileSelect">Select Comp File:</label>
+        <select id="compFileSelect"></select>
+        <button id="startCompositingBtn">Start Compositing</button>
+        <button id="refreshCompFilesBtn">Refresh List</button>
+      </div>
+    </div>
+    <div id="compositingStatus"></div>
+  </div>
+  
+  <div>
+    <h2>MP4 Playback</h2>
+    <div id="mp4Controls">
+      <div>
+        <label for="mp4FileSelect">Select MP4 File:</label>
+        <select id="mp4FileSelect"></select>
+        <button id="refreshMp4FilesBtn">Refresh List</button>
+      </div>
+      <div id="videoPlayer" style="margin-top: 10px; max-width: 100%;">
+        <video id="mp4Video" controls style="max-width: 100%;"></video>
+      </div>
+    </div>
+  </div>
+
   <!-- Render Control Modal -->
   <div id="renderControlModal" style="display: none;">
     <h3>Start Render on <span id="renderMachineName"></span></h3>
@@ -85,6 +113,21 @@
     let syncLogs = {};
     let selectedHostForLogs = '';
     let selectedLogType = 'render';
+
+
+    let compFiles = [];
+    let mp4Files = [];
+    let mainClientHostname = '';
+
+    //compositing and streaming
+    const compositingControls = document.getElementById('compositingControls');
+    const compositingStatus = document.getElementById('compositingStatus');
+    const compFileSelect = document.getElementById('compFileSelect');
+    const startCompositingBtn = document.getElementById('startCompositingBtn');
+    const refreshCompFilesBtn = document.getElementById('refreshCompFilesBtn');
+    const mp4FileSelect = document.getElementById('mp4FileSelect');
+    const refreshMp4FilesBtn = document.getElementById('refreshMp4FilesBtn');
+    const mp4Video = document.getElementById('mp4Video');
     
     // DOM Elements
     const clientsList = document.getElementById('clientsList');
@@ -146,6 +189,26 @@
     
     // Update the clients list UI
     function updateClientsList(clients) {
+      const mainClient = clients.find(client => client.isMainClient);
+      if (mainClient) {
+        mainClientHostname = mainClient.hostname;
+        compositingControls.style.display = 'block';
+        compositingStatus.textContent = `Compositing available on main client: ${mainClient.hostname}`;
+        
+        // Load comp files and MP4 files if they're not loaded yet
+        if (compFiles.length === 0) {
+          loadCompFiles();
+        }
+        if (mp4Files.length === 0) {
+          loadMp4Files();
+        }
+      } else {
+        compositingControls.style.display = 'none';
+        compositingStatus.textContent = 'Main client not connected, compositing unavailable';
+        mainClientHostname = '';
+      }
+  
+
       connectedClients = clients;
       
       // Update summary stats
@@ -397,6 +460,130 @@
       }));
     }
     
+
+
+
+
+    //new functions for compositing and streaming
+    // Load available .comp files
+    function loadCompFiles() {
+        fetch('/api/comp-files')
+            .then(response => response.json())
+            .then(data => {
+            compFiles = data.files || [];
+            updateCompFileSelect();
+            })
+            .catch(error => {
+            console.error('Error loading comp files:', error);
+            compositingStatus.textContent = 'Error loading comp files: ' + error.message;
+            });
+    }
+
+    // Update comp file select dropdown
+    function updateCompFileSelect() {
+        compFileSelect.innerHTML = '';
+        
+        if (compFiles.length === 0) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'No comp files found';
+            option.disabled = true;
+            option.selected = true;
+            compFileSelect.appendChild(option);
+            startCompositingBtn.disabled = true;
+            return;
+        }
+        
+        compFiles.forEach(file => {
+            const option = document.createElement('option');
+            option.value = file.filename;
+            option.textContent = file.filename;
+            compFileSelect.appendChild(option);
+        });
+        
+        startCompositingBtn.disabled = false;
+    }
+
+    // Start compositing process
+    function startCompositing() {
+        const compFile = compFileSelect.value;
+        
+        if (!compFile) {
+            alert('Please select a comp file');
+            return;
+        }
+        
+        if (!confirm(`Start compositing ${compFile} on ${mainClientHostname}?`)) {
+            return;
+        }
+        
+        socket.send(JSON.stringify({
+            type: 'startCompositing',
+            compFile: compFile
+        }));
+        
+        // Switch to logs view for the main client
+        logHostSelect.value = mainClientHostname;
+        selectedHostForLogs = mainClientHostname;
+        logTypeSelect.value = 'render';
+        selectedLogType = 'render';
+        updateConsoleOutput();
+    }
+
+    // Load available MP4 files
+    function loadMp4Files() {
+        fetch('/api/mp4-files')
+            .then(response => response.json())
+            .then(data => {
+            mp4Files = data.files || [];
+            updateMp4FileSelect();
+            })
+            .catch(error => {
+            console.error('Error loading MP4 files:', error);
+            });
+    }
+
+    // Update MP4 file select dropdown
+    function updateMp4FileSelect() {
+        mp4FileSelect.innerHTML = '';
+        
+        if (mp4Files.length === 0) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'No MP4 files found';
+            option.disabled = true;
+            option.selected = true;
+            mp4FileSelect.appendChild(option);
+            return;
+        }
+        
+        mp4Files.forEach(file => {
+            const option = document.createElement('option');
+            option.value = file.filename;
+            option.textContent = file.filename;
+            mp4FileSelect.appendChild(option);
+        });
+        
+        // Load the first MP4 by default
+        loadSelectedMp4();
+    }
+
+    // Load selected MP4 file
+    function loadSelectedMp4() {
+        const mp4File = mp4FileSelect.value;
+        
+        if (!mp4File) {
+            mp4Video.style.display = 'none';
+            return;
+        }
+        
+        const videoUrl = `/api/stream/${mp4File}`;
+        mp4Video.src = videoUrl;
+        mp4Video.style.display = 'block';
+    }
+
+
+
     // Initialize when page loads
     document.addEventListener('DOMContentLoaded', () => {
       // Connect to WebSocket server
@@ -423,6 +610,14 @@
       document.getElementById('cancelRenderBtn').addEventListener('click', () => {
         renderControlModal.style.display = 'none';
       });
+
+
+      //compositing and streaming
+      refreshCompFilesBtn.addEventListener('click', loadCompFiles);
+      startCompositingBtn.addEventListener('click', startCompositing);
+      // MP4 controls
+      refreshMp4FilesBtn.addEventListener('click', loadMp4Files);
+      mp4FileSelect.addEventListener('change', loadSelectedMp4);
     });
   </script>
 </body>

@@ -99,6 +99,80 @@ function broadcastSyncLogs(hostname, logs) {
   });
 }
 
+
+//comp and streaming
+// Get available comp files
+app.get('/api/comp-files', (req, res) => {
+  // Find the main client
+  const mainClient = Object.values(connectedClients).find(
+    client => getMachineDetails(client.hostname).isMainClient
+  );
+  
+  if (!mainClient) {
+    return res.status(404).json({ error: 'Main client not connected' });
+  }
+  
+  // Store the request
+  mainClient.pendingCompFilesRequest = res;
+  
+  // Request comp files from main client
+  mainClient.ws.send(JSON.stringify({
+    type: 'getCompFiles',
+    directoryPath: 'C:/renderfarm'
+  }));
+  
+  // Response will be sent when main client responds
+});
+  
+  // Get available MP4 files
+app.get('/api/mp4-files', (req, res) => {
+  // Find the main client
+  const mainClient = Object.values(connectedClients).find(
+    client => getMachineDetails(client.hostname).isMainClient
+  );
+  
+  if (!mainClient) {
+    return res.status(404).json({ error: 'Main client not connected' });
+  }
+  
+  // Store the request
+  mainClient.pendingMp4FilesRequest = res;
+  
+  // Request MP4 files from main client
+  mainClient.ws.send(JSON.stringify({
+    type: 'getMp4Files',
+    directoryPath: 'C:/renderfarm/comped'
+  }));
+  
+  // Response will be sent when main client responds
+});
+  
+  // Stream an MP4 file
+app.get('/api/stream/:filename', (req, res) => {
+  const filename = req.params.filename;
+  
+  // Find the main client
+  const mainClient = Object.values(connectedClients).find(
+    client => getMachineDetails(client.hostname).isMainClient
+  );
+  
+  if (!mainClient) {
+    return res.status(404).json({ error: 'Main client not connected' });
+  }
+  
+  // Store the streaming request
+  mainClient.pendingStreamRequest = res;
+  
+  // Request stream from main client
+  mainClient.ws.send(JSON.stringify({
+    type: 'streamFile',
+    filePath: 'C:/renderfarm/comped/' + filename
+  }));
+  
+  // Response will be handled when main client responds
+});
+
+
 // WebSocket connection handler
 wss.on('connection', (ws, req) => {
   console.log('New connection established');
@@ -398,7 +472,73 @@ wss.on('connection', (ws, req) => {
             }));
           }
           break;
-      }
+      
+        case 'compFiles':
+          // Main client is sending list of comp files
+          if (connectedClients[data.sessionId] && connectedClients[data.sessionId].pendingCompFilesRequest) {
+            const response = connectedClients[data.sessionId].pendingCompFilesRequest;
+            response.json({ files: data.files });
+            delete connectedClients[data.sessionId].pendingCompFilesRequest;
+          }
+          break;
+        
+        case 'mp4Files':
+          // Main client is sending list of MP4 files
+          if (connectedClients[data.sessionId] && connectedClients[data.sessionId].pendingMp4FilesRequest) {
+            const response = connectedClients[data.sessionId].pendingMp4FilesRequest;
+            response.json({ files: data.files });
+            delete connectedClients[data.sessionId].pendingMp4FilesRequest;
+          }
+          break;
+        
+        case 'streamData':
+          // Main client is sending stream data
+          if (connectedClients[data.sessionId] && connectedClients[data.sessionId].pendingStreamRequest) {
+            const response = connectedClients[data.sessionId].pendingStreamRequest;
+            
+            if (data.error) {
+              response.status(404).json({ error: data.error });
+            } else {
+              response.set('Content-Type', 'video/mp4');
+              response.send(Buffer.from(data.data, 'base64'));
+            }
+            
+            delete connectedClients[data.sessionId].pendingStreamRequest;
+          }
+          break;
+        
+        case 'startCompositing':
+          // Find main client
+          const mainClientComp = Object.values(connectedClients).find(
+            client => getMachineDetails(client.hostname).isMainClient
+          );
+          
+          if (!mainClientComp) {
+            console.log('Main client not connected, cannot start compositing');
+            // Notify admin UI
+            if (ws.isAdmin) {
+              ws.send(JSON.stringify({
+                type: 'renderLogs',
+                hostname: 'SERVER',
+                logs: [{
+                  time: new Date().toISOString(),
+                  message: 'Main client (POPPI) not connected, cannot start compositing'
+                }]
+              }));
+            }
+            break;
+          }
+          
+          // Forward compositing command to main client
+          mainClientComp.ws.send(JSON.stringify({
+            type: 'startCompositing',
+            compFile: data.compFile
+          }));
+          
+          console.log(`Compositing command sent to ${mainClientComp.hostname}`);
+          break;
+
+        }
     } catch (error) {
       console.error('Error processing message:', error);
     }
