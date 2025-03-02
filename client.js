@@ -212,6 +212,7 @@ function handleServerMessage(message) {
           }
         }
         break;
+      
       case 'calculateFileHash':
         // Calculate hash for a file and report if it matches the hash from the requesting client
         calculateAndReturnFileHash(
@@ -252,13 +253,55 @@ function handleServerMessage(message) {
       case 'getCompFiles':
         // Server is requesting list of .comp files
         sendSyncLog(`Server requested .comp files from directory: ${data.directoryPath}`);
-        const compFiles = getFilesByExtension(data.directoryPath, '.comp');
-        sendMessage({
+        
+        try {
+          // Check if directory exists
+          if (!fs.existsSync(data.directoryPath)) {
+            sendSyncLog(`Directory doesn't exist: ${data.directoryPath}`);
+            sendMessage({
+              type: 'compFiles',
+              sessionId: sessionId,
+              hostname: hostname,
+              files: []
+            });
+            return;
+          }
+          
+          // Get all files in the directory
+          const allFiles = fs.readdirSync(data.directoryPath);
+          sendSyncLog(`Found ${allFiles.length} total files in directory`);
+          
+          // Filter for .comp files manually
+          const compFiles = allFiles
+            .filter(filename => filename.toLowerCase().endsWith('.comp'))
+            .map(filename => {
+              const filePath = path.join(data.directoryPath, filename);
+              const stats = fs.statSync(filePath);
+              return {
+                filename: filename,
+                path: filePath,
+                size: stats.size,
+                mtime: stats.mtime
+              };
+            });
+          
+          sendSyncLog(`Found ${compFiles.length} .comp files: ${compFiles.map(f => f.filename).join(', ')}`);
+          
+          sendMessage({
             type: 'compFiles',
             sessionId: sessionId,
+            hostname: hostname,
             files: compFiles
-        });
-        sendSyncLog(`Sent list of ${compFiles.length} .comp files to server`);
+          });
+        } catch (error) {
+          sendSyncLog(`Error getting comp files: ${error.message}`);
+          sendMessage({
+            type: 'compFiles',
+            sessionId: sessionId,
+            hostname: hostname,
+            files: []
+          });
+        }
         break;
         
       case 'getMp4Files':
@@ -284,7 +327,37 @@ function handleServerMessage(message) {
         startCompositing(data.compFile);
         break;
 
-
+      case 'checkFolderContents':
+        // Direct check of folder contents for debugging
+        const folderPath = data.folderPath || renderfarmDirectory;
+        sendSyncLog(`Direct check of folder: ${folderPath}`);
+        
+        try {
+          if (!fs.existsSync(folderPath)) {
+            sendSyncLog(`Folder does not exist: ${folderPath}`);
+            return;
+          }
+          
+          const allFiles = fs.readdirSync(folderPath);
+          sendSyncLog(`Files in ${folderPath}:`);
+          allFiles.forEach(file => {
+            try {
+              const filePath = path.join(folderPath, file);
+              const stats = fs.statSync(filePath);
+              if (stats.isFile()) {
+                sendSyncLog(`  File: ${file} (${stats.size} bytes)`);
+              } else if (stats.isDirectory()) {
+                sendSyncLog(`  Dir: ${file}`);
+              }
+            } catch (err) {
+              sendSyncLog(`  Error reading ${file}: ${err.message}`);
+            }
+          });
+        } catch (error) {
+          sendSyncLog(`Error reading directory: ${error.message}`);
+        }
+        break;
+    
     }
   } catch (error) {
     console.error(`Error handling message: ${error.message}`);
@@ -699,28 +772,41 @@ function getFilesByExtension(dirPath, extension) {
     const result = [];
     
     if (!fs.existsSync(dirPath)) {
+      sendSyncLog(`Directory does not exist: ${dirPath}`);
       return result;
     }
     
+    sendSyncLog(`Scanning for ${extension} files in: ${dirPath}`);
     const items = fs.readdirSync(dirPath);
     
     for (const item of items) {
-      const itemPath = path.join(dirPath, item);
-      const stats = fs.statSync(itemPath);
-      
-      if (stats.isFile() && path.extname(item).toLowerCase() === extension.toLowerCase()) {
-        result.push({
-          filename: item,
-          path: itemPath,
-          size: stats.size,
-          mtime: stats.mtime
-        });
+      try {
+        const itemPath = path.join(dirPath, item);
+        const stats = fs.statSync(itemPath);
+        
+        // Debug log to see what files are being examined
+        if (stats.isFile()) {
+          sendSyncLog(`Found file: ${item}, extension: ${path.extname(item)}`);
+        }
+        
+        if (stats.isFile() && path.extname(item).toLowerCase() === extension.toLowerCase()) {
+          sendSyncLog(`Found matching ${extension} file: ${item}`);
+          result.push({
+            filename: item,
+            path: itemPath,
+            size: stats.size,
+            mtime: stats.mtime
+          });
+        }
+      } catch (err) {
+        sendSyncLog(`Error processing file ${item}: ${err.message}`);
       }
     }
     
+    sendSyncLog(`Found ${result.length} ${extension} files`);
     return result;
   } catch (error) {
-    console.error(`Error reading directory ${dirPath}: ${error.message}`);
+    sendSyncLog(`Error reading directory ${dirPath}: ${error.message}`);
     return [];
   }
 }

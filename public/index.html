@@ -49,7 +49,11 @@
         <select id="compFileSelect"></select>
         <button id="startCompositingBtn">Start Compositing</button>
         <button id="refreshCompFilesBtn">Refresh List</button>
+        <button id="checkFolderBtn">Debug Folder</button>
       </div>
+      
+      <div id="debugInfo" style="margin-top: 10px; font-family: monospace; background-color: #f0f0f0; padding: 5px; max-height: 100px; overflow-y: auto;"></div>
+
     </div>
     <div id="compositingStatus"></div>
   </div>
@@ -465,20 +469,34 @@
 
 
     //new functions for compositing and streaming
-    // Load available .comp files
-    function loadCompFiles() {
-        fetch('/api/comp-files')
-            .then(response => response.json())
-            .then(data => {
-            compFiles = data.files || [];
-            updateCompFileSelect();
-            })
-            .catch(error => {
-            console.error('Error loading comp files:', error);
-            compositingStatus.textContent = 'Error loading comp files: ' + error.message;
-            });
+    // Debug function to show progress
+    function showDebugInfo(message) {
+      const debugInfo = document.getElementById('debugInfo');
+      const timestamp = new Date().toLocaleTimeString();
+      debugInfo.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+      debugInfo.scrollTop = debugInfo.scrollHeight;
     }
-
+    
+    // Update loadCompFiles function with debugging
+    function loadCompFiles() {
+      showDebugInfo('Loading comp files...');
+      fetch('/api/comp-files')
+        .then(response => {
+          showDebugInfo(`Response status: ${response.status}`);
+          return response.json();
+        })
+        .then(data => {
+          showDebugInfo(`Received data: ${JSON.stringify(data)}`);
+          compFiles = data.files || [];
+          updateCompFileSelect();
+        })
+        .catch(error => {
+          showDebugInfo(`Error: ${error.message}`);
+          console.error('Error loading comp files:', error);
+          compositingStatus.textContent = 'Error loading comp files: ' + error.message;
+        });
+    }
+    
     // Update comp file select dropdown
     function updateCompFileSelect() {
         compFileSelect.innerHTML = '';
@@ -618,7 +636,22 @@
       // MP4 controls
       refreshMp4FilesBtn.addEventListener('click', loadMp4Files);
       mp4FileSelect.addEventListener('change', loadSelectedMp4);
+
+      document.getElementById('checkFolderBtn').addEventListener('click', () => {
+        showDebugInfo('Checking folder contents directly...');
+        if (mainClientHostname) {
+          const targetClient = connectedClients.find(c => c.hostname === mainClientHostname);
+          if (targetClient) {
+          socket.send(JSON.stringify({
+              type: 'checkFolderContents',
+              folderPath: 'C:/renderfarm'
+          }));
+          }
+        }
+      });
+
     });
+
   </script>
 </body>
 </html>

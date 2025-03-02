@@ -475,13 +475,23 @@ wss.on('connection', (ws, req) => {
       
         case 'compFiles':
           // Main client is sending list of comp files
-          if (connectedClients[data.sessionId] && connectedClients[data.sessionId].pendingCompFilesRequest) {
-            const response = connectedClients[data.sessionId].pendingCompFilesRequest;
-            response.json({ files: data.files });
-            delete connectedClients[data.sessionId].pendingCompFilesRequest;
+            console.log(`Received comp files from ${data.sessionId || 'unknown'}: ${JSON.stringify(data.files)}`);
+            
+            // Find the client by hostname instead of sessionId
+            const clientsWithPendingRequests = Object.values(connectedClients)
+              .filter(client => client.pendingCompFilesRequest && client.hostname === data.hostname);
+            
+            if (clientsWithPendingRequests.length > 0) {
+            clientsWithPendingRequests.forEach(client => {
+              const response = client.pendingCompFilesRequest;
+              response.json({ files: data.files });
+              delete client.pendingCompFilesRequest;
+            });
+          } else {
+            console.log('No pending comp file requests found');
           }
           break;
-        
+          
         case 'mp4Files':
           // Main client is sending list of MP4 files
           if (connectedClients[data.sessionId] && connectedClients[data.sessionId].pendingMp4FilesRequest) {
