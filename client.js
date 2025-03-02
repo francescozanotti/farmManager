@@ -221,72 +221,73 @@ function handleServerMessage(message) {
 
 // Sync files from source host
 function syncFilesFromSource(sourceHost, sourcePath, files) {
-  sendSyncLog(`Starting sync from ${sourceHost}`);
-  
-  // Update sync status
-  sendMessage({
-    type: 'syncResult',
-    sessionId: sessionId,
-    success: true,
-    message: 'Sync started'
-  });
-  
-  // Create a list to track requested files
-  const requestedFiles = new Set();
-  
-  // Process each file
-  for (const file of files) {
-    const localPath = path.join(renderfarmDirectory, file.path);
-    const localDir = path.dirname(localPath);
+    sendSyncLog(`Starting sync from ${sourceHost}`);
     
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(localDir)) {
-      try {
-        fs.mkdirSync(localDir, { recursive: true });
-        sendSyncLog(`Created directory: ${localDir}`);
-      } catch (error) {
-        sendSyncLog(`Error creating directory ${localDir}: ${error.message}`);
-        continue;
-      }
-    }
-    
-    // Check if we need to request this file
-    let needsUpdate = true;
-    
-    if (fs.existsSync(localPath)) {
-      const stats = fs.statSync(localPath);
-      
-      // If same size and modification time is the same or newer, skip
-      if (stats.size === file.size && 
-          new Date(stats.mtime) >= new Date(file.mtime)) {
-        needsUpdate = false;
-      }
-    }
-    
-    if (needsUpdate) {
-      // Request the file from source host
-      requestedFiles.add(file.path);
-      sendMessage({
-        type: 'requestFile',
-        sourceHost: sourceHost,
-        requestingHost: hostname,
-        filePath: file.path
-      });
-    }
-  }
-  
-  // If no files need updating, we're done
-  if (requestedFiles.size === 0) {
-    sendSyncLog('No files need updating - sync complete');
+    // Update sync status
     sendMessage({
       type: 'syncResult',
       sessionId: sessionId,
       success: true,
-      message: 'All files are up to date'
+      message: 'Sync started'
     });
-  } else {
-    sendSyncLog(`Requested ${requestedFiles.size} files for sync`);
-  }
+    
+    // Create a list to track requested files
+    const requestedFiles = new Set();
+    pendingFiles = new Set(); // Reset pending files
+    
+    // Process each file
+    for (const file of files) {
+      const localPath = path.join(renderfarmDirectory, file.path);
+      const localDir = path.dirname(localPath);
+      
+      // Create directory if it doesn't exist
+      if (!fs.existsSync(localDir)) {
+        try {
+          fs.mkdirSync(localDir, { recursive: true });
+          sendSyncLog(`Created directory: ${localDir}`);
+        } catch (error) {
+          sendSyncLog(`Error creating directory ${localDir}: ${error.message}`);
+          continue;
+        }
+      }
+      
+      // Check if we need to request this file - ONLY COMPARE SIZE
+      let needsUpdate = true;
+      
+      if (fs.existsSync(localPath)) {
+        const stats = fs.statSync(localPath);
+        
+        // If same size, skip (not checking modification time)
+        if (stats.size === file.size) {
+          needsUpdate = false;
+        }
+      }
+      
+      if (needsUpdate) {
+        // Request the file from source host
+        requestedFiles.add(file.path);
+        pendingFiles.add(file.path); // Track pending files
+        sendMessage({
+          type: 'requestFile',
+          sourceHost: sourceHost,
+          requestingHost: hostname,
+          filePath: file.path
+        });
+      }
+    }
+    
+    // If no files need updating, we're done
+    if (requestedFiles.size === 0) {
+      sendSyncLog('No files need updating - sync complete');
+      sendMessage({
+        type: 'syncResult',
+        sessionId: sessionId,
+        success: true,
+        message: 'All files are up to date'
+      });
+    } else {
+      sendSyncLog(`Requested ${requestedFiles.size} files for sync`);
+    }
 }
 
 // Send a file to another client
